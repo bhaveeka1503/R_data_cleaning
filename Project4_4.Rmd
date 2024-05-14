@@ -1,0 +1,1137 @@
+---
+title: "Project 4"
+author: "PUT DOWN YOUR NAME"
+date: "12/1/2023"
+output:
+  word_document: default
+  html_notebook: default
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r active="", eval=FALSE}
+# BEGIN ASSIGNMENT 
+```
+
+```{r include=FALSE, error=TRUE, label=setup, message=FALSE}
+#| label: setup
+#| include: false
+#| message: false
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(stringr)
+library(repurrrsive)
+library(tidymodels)
+library(arrow)
+library(openxlsx)
+library(scales)
+library(dplyr)
+
+
+tidymodels_prefer() # to specify that tidymodels functions override those from other packages
+```
+
+**NOTE**: If you have used AI(s) in producing some of your work, please list the respective AI(s) as a collaborator below. Please also describe the contribution from the input of the AI(s) in the textbox, as well as provide details on how you have used the AI(s) in the process.
+
+```         
+   If you have used AI(s), input information in this box.
+```
+
+# Project 4
+
+## Overview
+
+In this project, we will continue using the NOAA storm data set, which you have already worked with in Projects 2 and 3, and the sea ice data set, which you have seen in Project 3, as well as in lectures. We will preprocess the data and attempt to build linear regression models for aspects in the data.
+
+## Model for Pacific and Atlantic hurricanes
+
+We first load the hurricane data from NOAA, which you have worked with in both Projects 2 and 3.
+
+```{r error=TRUE}
+# Nothing to change here
+cyclone_data_address <- "https://www.nhc.noaa.gov/data/hurdat/"
+AT_cyclone <- "hurdat2-1851-2022-050423.txt"
+NP_cyclone <- "hurdat2-nepac-1949-2022-050423.txt"
+cyclone_files <- c(AT_cyclone, NP_cyclone)
+
+new_columns <- c("status", "latitude", "longitude", "max_wind", "min_pressure", "NE_extend_34", "SE_extend_34", "SW_extend_34", "NW_extend_34", "NE_extend_50", "SE_extend_50", "SW_extend_50", "NW_extend_50", "NE_extend_64", "SE_extend_64", "SW_extend_64", "NW_extend_64", "r_max_wind"
+)
+
+cat_levels <- c("TD", "TS", "1", "2", "3", "4", "5")
+```
+
+We reuse the code to load the data from NOAA directly and put them into a dataframe named `cyclones`, as in Project 3 or combining codes from Lectures 9 and 17.
+
+```{r error=TRUE, tags=c()}
+
+read_cyclone <- function(single_file = AT_cyclone) {
+  
+  output <- str_c(cyclone_data_address, single_file, sep = "") |>
+    
+    read_csv(col_names = c("1","2","3","4")) |>
+    
+    separate_wider_delim("4", delim = ",", names = new_columns) |>
+
+    mutate(across(everything(), str_trim)) |>
+    
+    mutate_all(~ifelse(. == "-999", NA, .)) |>
+    
+    mutate(
+      BasinNumberYear = ifelse(is.na(status), `1`, NA),
+      
+      Name = ifelse(is.na(status), `2`, NA),
+      
+      Entries = ifelse(is.na(status), `3`, NA)) |>
+    
+    relocate(BasinNumberYear, Name, Entries) |>
+    
+    fill(BasinNumberYear, Name, Entries) |>
+    
+    filter(!is.na(status)) |>
+    
+    select(-Entries) |>
+    
+    separate_wider_position(
+      cols = BasinNumberYear,
+      
+      widths = c(
+        Basin = 2,
+        Number = 2,
+        NameYear = 4 )) |>
+    
+    separate_wider_position(
+      cols = `1`,
+      widths = c(
+        ObservYear = 4,
+        Month = 2,
+        Day = 2)) |>
+    
+    separate_wider_position(
+      cols = `2`,
+      widths = c(
+        Hour = 2,
+        Minute = 2 )) |>
+    
+    rename(Identifier = `3`) |>
+    
+    mutate(
+      across(c(NameYear, ObservYear, Month, Day, Hour, Minute, Number),          as.integer),
+      
+      across(max_wind:r_max_wind, as.double)) |>
+    
+    mutate(max_wind = na_if(max_wind, -99))
+  
+  output
+}
+
+convert_latlong <- function(df) {
+  
+  output <- df |>
+    
+    mutate(
+      num_lat = if_else(str_sub(latitude,-1,-1) == "N", str_sub(latitude,1,-2), str_c("-", str_sub(latitude,1,-2))),
+      
+      num_long = if_else(str_sub(longitude,-1,-1) == "E", str_sub(longitude,1,-2), str_c("-", str_sub(longitude,1,-2)))) |>
+    
+    mutate(num_long = if_else(num_long == "--0.0", "-0.0", num_long)) |>
+    mutate(across(c(num_lat, num_long), as.numeric))
+  
+  output
+}
+
+cyclones_raw <- cyclone_files |>
+  
+  map(read_cyclone)
+
+(cyclones<- cyclones_raw |>
+    
+    map(convert_latlong) |>
+    
+    list_rbind() |>
+    
+    mutate(
+      observ_time = make_datetime(ObservYear, Month, Day, Hour, Minute),
+      
+      category = ordered(
+        
+        case_when(
+          max_wind <= 33 ~ "TD",
+          max_wind <= 63 ~ "TS",
+          max_wind <= 82 ~ "1",
+          max_wind <= 95 ~ "2",
+          max_wind <= 112 ~ "3",
+          max_wind <= 136 ~ "4",
+          max_wind > 137 ~ "5"
+        ), 
+        
+        levels = cat_levels))
+)
+
+```
+
+```{r error=TRUE}
+. = ottr::check("tests/Cyclones1.R")
+```
+
+We'd like to see if the number of cyclones in Atlantic and Pacific in a year is somehow related, and if a simple linear regression model can give us some information. To start, we need to process the data so that we have the counts we would like to use. We count the number of cyclones in each year that reach a given maximal category.
+
+```{r error=TRUE, tags=c()}
+cat_levels <- c("TD", "TS", "1", "2", "3", "4", "5")
+
+(cyclones <- cyclones)
+
+(cyclones_cat_count <- cyclones |>
+  summarize(
+    
+    .by = c(Basin, NameYear, Number),
+    
+    max_cat = max(category, na.rm = TRUE)
+    
+  ) |>
+  summarize(
+    
+    .by = c(Basin, NameYear, max_cat),
+    
+    count = n()
+  ))
+```
+
+```{r error=TRUE}
+. = ottr::check("tests/Cyclones2.R")
+```
+
+Then we split the resulted counting data into two, one of which contains the information about the Atlantic, and the other contains the rest of them.
+
+```{r error=TRUE, tags=c()}
+(atlantic_cyclones_cat_count <- cyclones_cat_count |>
+   filter(Basin == "AL"))
+  
+(pacific_cyclones_cat_count <- cyclones_cat_count |>
+    filter(Basin != "AL"))
+
+```
+```{r error=TRUE}
+. = ottr::check("tests/Cyclones3.R")
+```
+
+We then reorganize the dataframes so that they can be joined and we can look at possible relation between the numbers in the two oceans.
+
+```{r error=TRUE}
+# Nothing to change here
+
+## Try to understand the code in this block and make sure to know what the output looks like
+## It will be useful for working with the later code blocks.
+count_by_cat <- function(cyclones_cat_count, basin = "AL") {
+  cyclones_cat_count|>
+    pivot_wider(
+      names_from = max_cat,
+      
+      names_prefix = "max_cat",
+      
+      values_from = count
+      ) |>
+    rowwise(c(Basin, NameYear)) |>
+    mutate(
+      non_hurricane = sum(c(max_catTS, max_catTD), na.rm = TRUE),
+      hurricane = sum(c(max_cat1, max_cat2, max_cat3, max_cat4, max_cat5), na.rm = TRUE)
+    ) |>
+    ungroup() |>
+    rename_with(
+      
+      ~ paste0(basin, .x, recycle0 = TRUE),
+      
+      .cols = contains("max_cat") | contains("hurricane")
+    )
+}
+(atlantic_by_cat <- atlantic_cyclones_cat_count |>
+    count_by_cat(basin = "AL-") |>
+    select(-Basin)
+)
+(pacific_by_cat <- pacific_cyclones_cat_count |>
+    count_by_cat(basin = "PC-") |>
+    
+    summarize(
+      
+      .by = NameYear,
+      across(contains("max_cat"), ~ sum(., na.rm = TRUE)),
+      across(contains("hurricane"), ~ sum(., na.rm = TRUE))
+    )
+)
+```
+
+We can start with looking at the correlation coefficient of the numbers of hurricanes in the two oceans.
+
+```{r error=TRUE, tags=c()}
+(joined_count_by_cat <-
+   inner_join(atlantic_by_cat, pacific_by_cat, by = "NameYear") 
+)
+
+(cor_coeff <-
+    cor(
+      joined_count_by_cat |> select(contains("AL-hurricane")) |> unlist(),
+      
+      joined_count_by_cat |> select(contains("PC-hurricane")) |> unlist(), 
+      
+      method = "pearson")
+)
+```
+```{r error=TRUE}
+. = ottr::check("tests/Cyclones4.R")
+```
+
+The correlation coefficient at roughly `-0.3` does not indicate any strong linear correlation. It can also be seen in a plot as follows.
+
+```{r error=TRUE, tags=c()}
+(count_plot <- joined_count_by_cat |>
+   ggplot(aes(x = `AL-hurricane`, y = `PC-hurricane`)) + 
+   geom_jitter() +
+   labs(
+     x = 'Number of hurricanes in the Atlantic', y = 'Number of hurricanes in the Pacific', 
+     title = 'Numbers of hurricanes in a year, Atlantic v.s. Pacific',
+     subtitle = 'Very slightly negatively related',
+     caption = 'Data from NOAA')
+)
+```
+```{r error=TRUE}
+. = ottr::check("tests/Cyclones5.R")
+```
+
+Nonetheless, it does not prevent us from trying to build a model and force some numbers from the data, as it is well-known that "[if you torture the data long enough, it will confess](https://quoteinvestigator.com/2021/01/18/confess/)".
+
+```{r error=TRUE, tags=c()}
+(rough_spec <- linear_reg() |> 
+  set_engine("lm") |>
+  set_mode("regression"))
+
+(rough_fit <-
+    fit(
+      rough_spec, 
+      data = joined_count_by_cat, 
+      formula = `AL-hurricane` ~  `PC-hurricane`)
+)
+
+(rough_aug <- 
+    augment(
+      rough_fit, 
+      new_data = joined_count_by_cat)
+)
+
+(rough_fit_engine <- extract_fit_engine(rough_fit))
+
+(rough_info <-
+    summary(rough_fit_engine)
+)
+```
+```{r error=TRUE}
+. = ottr::check("tests/Cyclones6.R")
+```
+
+Only about `10%` of the variations is captured by a linear model. Again it indicates that there should not be much chance that the number of hurricanes in the two oceans are linearly related. Other models can be attempted, such as a quadratic model.
+
+```{r error=TRUE, tags=c()}
+quad_spec <- linear_reg() |> 
+  set_engine("lm") |> 
+  set_mode("regression")
+
+(quad_fit <-
+    fit(
+      quad_spec, 
+      data = joined_count_by_cat, 
+      formula = `AL-hurricane` ~ poly(`PC-hurricane`, 2)
+    )
+)
+
+(quad_aug <-
+    broom::augment(
+      quad_fit, 
+      new_data = joined_count_by_cat
+      )
+)
+
+quad_fit_engine <- extract_fit_engine(quad_fit)
+
+(quad_info <-
+    summary(
+      quad_fit_engine
+      )
+)
+```
+```{r error=TRUE}
+. = ottr::check("tests/Cyclones7.R")
+```
+
+The situation is not much better even with quadratic terms. Instead of concluding that the hurricanes in the two oceans are not related, this probably indicates that the way we are trying to see the relation is not the best one. Indeed, simple counting of numbers omits a lot of details, and it is not too surprising that we do not uncover anything meaningful. Maybe one should instead look at more detailed indicators, such as days with wind speed above certain threshold etc. This is how empirical research can be carried out, testing and trying out factors to consider.
+
+## Model for sea ice extent v.s. sea ice area
+
+Next, we try to see how to understand the difference between the ice extent and ice area captured in the sea ice data, that we have seen in the lectures and in Project 3.
+
+```{r error=TRUE}
+
+# Nothing to change here
+sea_ice_regional <- "https://masie_web.apps.nsidc.org/pub//DATASETS/NOAA/G02135/seaice_analysis/"
+
+sea_ice_files <- c("N_Sea_Ice_Index_Regional_Daily_Data_G02135_v3.0.xlsx", "S_Sea_Ice_Index_Regional_Daily_Data_G02135_v3.0.xlsx")
+
+(sea_ice <- str_c(sea_ice_regional, sea_ice_files, sep = ""))
+```
+First load the sea ice extent files for both northern and southern regions.
+
+```{r error=TRUE}
+# Nothing to change here
+## this saves a xlsx file from an online address
+download_xlsx <- function(remote_xlsx_file = sea_ice[[1]], local_xlsx_file = sea_ice_files[[1]]){
+  download.file(
+    url = remote_xlsx_file, 
+    destfile = local_xlsx_file, 
+    method = "auto", 
+    mode = "wb")
+}
+
+## this loads the single sheet from a file
+ice_extent_sheet <- function(local_xlsx_file = sea_ice_files[[1]], single_sheet) {
+  local_xlsx_file |>
+    read.xlsx(
+      sheet = single_sheet,
+      skipEmptyCols = TRUE,
+      fillMergedCells = TRUE,
+    ) |>
+    pivot_longer(
+      cols = !c(month, day),
+      names_to = "year",
+      names_transform = list(year = as.integer),
+      values_to = "ice_extent", 
+      values_drop_na = TRUE,
+    ) |>
+    mutate(
+      month = ordered(
+        month,
+        levels = c("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")),
+      sheet_name = single_sheet
+    ) |>
+    separate_wider_regex(
+      cols = sheet_name,
+      patterns = c(
+        region = "[\\w-]+",
+        "-",
+        measure = "Area|Extent",
+        "-km\\^2"
+      )
+    ) |>
+    mutate(
+      region = str_replace(region, '-', ' '),
+      hemisphere = str_sub(local_xlsx_file, 1, 1)
+    )
+}
+
+```
+
+Then we `map` and `rbind` to load all the sheets of a file, by first using `download_xlsx` to save the file locally, then load all the sheets that have the area/extent data from the saved file (to avoid repeatedly making remote connections).
+
+```{r error=TRUE, tags=c()}
+# load one file from the sea_ice extent data
+ice_extent_file <- function(remote_xlsx_file = sea_ice[[1]], local_xlsx_file = sea_ice_files[[1]]){
+  remote_xlsx_file |>
+    download_xlsx(local_xlsx_file)  
+  
+  sheet_names <- local_xlsx_file |>
+    openxlsx::getSheetNames()
+  
+  data_sheets <-
+    sheet_names[sapply(sheet_names, function(sheet) grepl("Area|Extent", sheet, ignore.case = TRUE))]
+  
+  purrr::map(
+    data_sheets,
+    ~ ice_extent_sheet(local_xlsx_file, .)) |>
+    bind_rows()  
+}
+
+```
+```{r error=TRUE}
+. = ottr::check("tests/Seaice1.R")
+```
+
+The function can be tested directly as follows and it should load the Northern hemisphere file.
+
+```{r error=TRUE}
+# Nothing to change here
+ice_extent_file()
+```
+
+Using the function `ice_extent_file` in `pmap`, together with `list_rbind()`, we load both files into a dataframe.
+
+```{r error=TRUE, tags=c()}
+(loaded_ice_extent <-
+   pmap(
+     list(
+       remote_xlsx_file = sea_ice,
+       local_xlsx_file = sea_ice_files
+       ),
+     ice_extent_file) |>
+   list_rbind()
+)
+```
+```{r error=TRUE}
+. = ottr::check("tests/Seaice2.R")
+```
+
+
+The values in the column `measure` indicate the number in `ice_extent` is the actual `Area` or the `Extent` of the ice in the `region`. We want to see how the `Area` and `Extent` relate, so we will need to reorganize the datafram by pivoting.
+
+```{r error=TRUE, tags=c()}
+(seaice <- loaded_ice_extent |>
+   pivot_wider(
+     id_cols = c("month", "day", "year", "region", "hemisphere"),
+     names_from = measure,
+     values_from = ice_extent
+     )
+)
+```
+
+
+```{r error=TRUE}
+. = ottr::check("tests/Seaice3.R")
+```
+
+We can use log scale plot to get a sense of what model we should expect.
+
+```{r error=TRUE, tags=c()}
+seaicelabs <- labs(x="Logrithmic scale for Area measurements", 
+       y="Logrithmic scale for Extent measurements",
+       title="Relation between the measurements of Area and Extent for sea ice",
+       subtitle="Linear in log scale", 
+       caption="Data from NSIDC")
+
+(seaice_plot <- seaice |>
+    ggplot(mapping = aes(x=Area, y=Extent)) + 
+    geom_point() +
+    geom_smooth() +
+    scale_x_log10() +
+    scale_y_log10() +
+    seaicelabs
+)
+```
+
+```{r error=TRUE}
+. = ottr::check("tests/Seaice4.R")
+```
+
+The plot very much asks for a linear regression model for the logarithm of `Area` and `Extent`. We create a dataframe including the (base 2) logarithm of the values in `Area` and `Extent`. Note that there will be `NA` values and we need to make sure that we do not take logarithm of `0` or `NA`. So we need to filter the rows that contains `NA` values out from the result.
+
+```{r error=TRUE, tags=c()}
+str(seaice)
+
+(log_seaice <- seaice |>
+    mutate(
+      date = make_date(year, month, day),
+      log_area = log2(Area),
+      log_extent = log2(Extent)
+      ) |>
+    filter(!((is.na(Area) | is.na(Extent)) | (Area == 0 | Extent == 0))) 
+)
+```
+
+```{r error=TRUE}
+. = ottr::check("tests/Seaice5.R")
+```
+
+We now split the data into two portions, for *training* and *testing*.
+
+```{r error=TRUE, tags=c()}
+set.seed(505)
+(seaice_split <- log_seaice |>
+    initial_split(prop=0.80)
+)
+(seaice_training <- seaice_split |>
+    training()
+)
+(seaice_testing <- seaice_split |>
+    testing()
+)
+```
+```{r error=TRUE}
+. = ottr::check("tests/Seaice6.R")
+```
+
+Now set up the workflow for all linear regression model.
+
+```{r error=TRUE, tags=c()}
+(lm_wflow <- workflow() |>
+   add_model(
+     linear_reg() |>
+       set_engine("lm")
+     )
+)
+```
+
+```{r error=TRUE}
+. = ottr::check("tests/Seaice7.R")
+```
+
+Then create the workflow for the relations between `log_extent` and `log_area`, following the steps.
+
+```{r error=TRUE, tags=c()}
+(seaice_ratio_wflow <- lm_wflow  |>
+   add_formula(log_extent~log_area)
+)
+
+(seaice_training_fit <- seaice_ratio_wflow  |>
+    fit(seaice_training)
+)
+
+(seaice_training_summary <- seaice_training_fit  |>
+    extract_fit_engine() |>
+    summary()
+  )
+```
+
+```{r error=TRUE}
+. = ottr::check("tests/Seaice8.R")
+```
+
+So the model basically says that the `Extent` and `Area` should more or less follow the relation $$Extent = 2^{3.5536} Area^{0.8405} = 11.742 Area^{0.8405}$$ Now we pretend that we have gone through the tuning and selecting of models and can test the model by fit it to the testing data and collect the metrics to see how well it does.
+
+```{r error=TRUE, tags=c()}
+
+(seaice_final <- seaice_training_fit |>
+   last_fit(seaice_split)
+)
+
+(fitted_seaice <- seaice_final |>
+    extract_workflow()
+)
+
+(seaice_testing_metrics <- seaice_final |>
+    collect_metrics()
+)
+```
+
+```{r error=TRUE}
+. = ottr::check("tests/Seaice9.R")
+```
+
+The metrics from the testing data show that the model is quite good, as more than $98\%$ of the variation from the `log_extent` is captured by the model. We can try to plot the residuals.
+
+```{r error=TRUE, tags=c()}
+(seaice_resid_plot <- seaice_final |>
+   collect_predictions() |>
+   select(.pred) |>
+   cbind(seaice_testing) |>
+   mutate(residual = log_extent - .pred) |>
+   ggplot(mapping = aes(x = log_extent, y = residual)) + 
+   geom_hex(bins = 85) +
+   theme_minimal()
+)
+```
+
+```{r error=TRUE}
+. = ottr::check("tests/Seaice10.R")
+```
+
+The residuals seem to still have some patterns. In particular, it looks like the model tends to over-estimate the ice extent when the area is small.
+
+This is the end of Project 4, while there are many questions to ask with these data and things to learn using modeling.
+
+```{r active="", eval=FALSE}
+# END ASSIGNMENT 
+```
+
+We'd like to see if the number of cyclones in Atlantic and Pacific in a year is somehow related, and if a simple linear regression model can give us some information. To start, we need to process the data so that we have the counts we would like to use. We count the number of cyclones in each year that reach a given maximal category.
+
+```{r error=TRUE, tags=c()}
+cat_levels <- c("TD", "TS", "1", "2", "3", "4", "5")
+
+(cyclones <- cyclones)
+
+(cyclones_cat_count <- cyclones |>
+  summarize(
+    .by = c(Basin, NameYear, Number),
+    max_cat = max(category, na.rm = TRUE)
+  ) |>
+  summarize(
+    .by = c(Basin, NameYear, max_cat),
+    count = n()
+  ))
+```
+
+```{r error=TRUE}
+. = ottr::check("tests/Cyclones2.R")
+```
+
+Then we split the resulted counting data into two, one of which contains the information about the Atlantic, and the other contains the rest of them.
+
+```{r error=TRUE, tags=c()}
+(atlantic_cyclones_cat_count <- cyclones_cat_count |>
+   filter(Basin == "AL"))
+  
+(pacific_cyclones_cat_count <- cyclones_cat_count |>
+    filter(Basin != "AL"))
+
+```
+```{r error=TRUE}
+. = ottr::check("tests/Cyclones3.R")
+```
+
+We then reorganize the dataframes so that they can be joined and we can look at possible relation between the numbers in the two oceans.
+
+```{r error=TRUE}
+# Nothing to change here
+
+## Try to understand the code in this block and make sure to know what the output looks like
+## It will be useful for working with the later code blocks.
+count_by_cat <- function(cyclones_cat_count, basin = "AL") {
+  cyclones_cat_count|>
+    pivot_wider(
+      names_from = max_cat,
+      names_prefix = "max_cat",
+      values_from = count
+      ) |>
+    rowwise(c(Basin, NameYear)) |>
+    mutate(
+      non_hurricane = sum(c(max_catTS, max_catTD), na.rm = TRUE),
+      hurricane = sum(c(max_cat1, max_cat2, max_cat3, max_cat4, max_cat5), na.rm = TRUE)
+    ) |>
+    ungroup() |>
+    rename_with(
+      ~ paste0(basin, .x, recycle0 = TRUE),
+      .cols = contains("max_cat") | contains("hurricane")
+    )
+}
+(atlantic_by_cat <- atlantic_cyclones_cat_count |>
+    count_by_cat(basin = "AL-") |>
+    select(-Basin)
+)
+(pacific_by_cat <- pacific_cyclones_cat_count |>
+    count_by_cat(basin = "PC-") |>
+    summarize(
+      .by = NameYear,
+      across(contains("max_cat"), ~ sum(., na.rm = TRUE)),
+      across(contains("hurricane"), ~ sum(., na.rm = TRUE))
+    )
+)
+```
+
+We can start with looking at the correlation coefficient of the numbers of hurricanes in the two oceans.
+
+```{r error=TRUE, tags=c()}
+# Joining Atlantic and Pacific cyclone count data by year
+(joined_count_by_cat <-
+   inner_join(atlantic_by_cat, pacific_by_cat, by = "NameYear") 
+)
+
+(cor_coeff <-
+    cor(
+      joined_count_by_cat |> select(contains("AL-hurricane")) |> unlist(),
+      joined_count_by_cat |> select(contains("PC-hurricane")) |> unlist(), 
+      method = "pearson")
+)
+
+```
+```{r error=TRUE}
+. = ottr::check("tests/Cyclones4.R")
+```
+
+The correlation coefficient at roughly `-0.3` does not indicate any strong linear correlation. It can also be seen in a plot as follows.
+
+```{r error=TRUE, tags=c()}
+(count_plot <- joined_count_by_cat |>
+   ggplot(aes(x = `AL-hurricane`, y = `PC-hurricane`)) + 
+   geom_jitter() +
+   labs(
+     x = 'Number of hurricanes in the Atlantic', y = 'Number of hurricanes in the Pacific', 
+     title = 'Numbers of hurricanes in a year, Atlantic v.s. Pacific',
+     subtitle = 'Very slightly negatively related',
+     caption = 'Data from NOAA')
+)
+```
+```{r error=TRUE}
+. = ottr::check("tests/Cyclones5.R")
+```
+
+Nonetheless, it does not prevent us from trying to build a model and force some numbers from the data, as it is well-known that "[if you torture the data long enough, it will confess](https://quoteinvestigator.com/2021/01/18/confess/)".
+
+```{r error=TRUE, tags=c()}
+(rough_spec <- linear_reg() |> 
+  set_engine("lm") |>
+  set_mode("regression"))
+
+(rough_fit <-
+    fit(
+      rough_spec, 
+      data = joined_count_by_cat, 
+      formula = `AL-hurricane` ~  `PC-hurricane`)
+)
+
+(rough_aug <- 
+    augment(
+      rough_fit, 
+      new_data = joined_count_by_cat)
+)
+
+(rough_fit_engine <- extract_fit_engine(rough_fit))
+
+(rough_info <-
+    summary(rough_fit_engine)
+)
+```
+```{r error=TRUE}
+. = ottr::check("tests/Cyclones6.R")
+```
+
+Only about `10%` of the variations is captured by a linear model. Again it indicates that there should not be much chance that the number of hurricanes in the two oceans are linearly related. Other models can be attempted, such as a quadratic model.
+
+```{r error=TRUE, tags=c()}
+quad_spec <- linear_reg() |> 
+  set_engine("lm") |> 
+  set_mode("regression")
+
+(quad_fit <-
+    fit(
+      quad_spec, 
+      data = joined_count_by_cat, 
+      formula = `AL-hurricane` ~ poly(`PC-hurricane`, 2)
+    )
+)
+
+(quad_aug <-
+    broom::augment(
+      quad_fit, 
+      new_data = joined_count_by_cat
+      )
+)
+
+quad_fit_engine <- extract_fit_engine(quad_fit)
+
+(quad_info <-
+    summary(
+      quad_fit_engine
+      )
+)
+```
+```{r error=TRUE}
+. = ottr::check("tests/Cyclones7.R")
+```
+
+The situation is not much better even with quadratic terms. Instead of concluding that the hurricanes in the two oceans are not related, this probably indicates that the way we are trying to see the relation is not the best one. Indeed, simple counting of numbers omits a lot of details, and it is not too surprising that we do not uncover anything meaningful. Maybe one should instead look at more detailed indicators, such as days with wind speed above certain threshold etc. This is how empirical research can be carried out, testing and trying out factors to consider.
+
+## Model for sea ice extent v.s. sea ice area
+
+Next, we try to see how to understand the difference between the ice extent and ice area captured in the sea ice data, that we have seen in the lectures and in Project 3.
+
+```{r error=TRUE}
+
+# Nothing to change here
+sea_ice_regional <- "https://masie_web.apps.nsidc.org/pub//DATASETS/NOAA/G02135/seaice_analysis/"
+
+sea_ice_files <- c("N_Sea_Ice_Index_Regional_Daily_Data_G02135_v3.0.xlsx", "S_Sea_Ice_Index_Regional_Daily_Data_G02135_v3.0.xlsx")
+
+(sea_ice <- str_c(sea_ice_regional, sea_ice_files, sep = ""))
+```
+First load the sea ice extent files for both northern and southern regions.
+
+```{r error=TRUE}
+# Nothing to change here
+## this saves a xlsx file from an online address
+download_xlsx <- function(remote_xlsx_file = sea_ice[[1]], local_xlsx_file = sea_ice_files[[1]]){
+  download.file(
+    url = remote_xlsx_file, 
+    destfile = local_xlsx_file, 
+    method = "auto", 
+    mode = "wb")
+}
+
+## this loads the single sheet from a file
+ice_extent_sheet <- function(local_xlsx_file = sea_ice_files[[1]], single_sheet) {
+  local_xlsx_file |>
+    read.xlsx(
+      sheet = single_sheet,
+      skipEmptyCols = TRUE,
+      fillMergedCells = TRUE,
+    ) |>
+    pivot_longer(
+      cols = !c(month, day),
+      names_to = "year",
+      names_transform = list(year = as.integer),
+      values_to = "ice_extent", 
+      values_drop_na = TRUE,
+    ) |>
+    mutate(
+      month = ordered(
+        month,
+        levels = c("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")),
+      sheet_name = single_sheet
+    ) |>
+    separate_wider_regex(
+      cols = sheet_name,
+      patterns = c(
+        region = "[\\w-]+",
+        "-",
+        measure = "Area|Extent",
+        "-km\\^2"
+      )
+    ) |>
+    mutate(
+      region = str_replace(region, '-', ' '),
+      hemisphere = str_sub(local_xlsx_file, 1, 1)
+    )
+}
+
+```
+
+Then we `map` and `rbind` to load all the sheets of a file, by first using `download_xlsx` to save the file locally, then load all the sheets that have the area/extent data from the saved file (to avoid repeatedly making remote connections).
+
+```{r error=TRUE, tags=c()}
+# load one file from the sea_ice extent data
+ice_extent_file <- function(remote_xlsx_file = sea_ice[[1]],
+                            local_xlsx_file = sea_ice_files[[1]]){
+  
+  remote_xlsx_file |>
+    download_xlsx(local_xlsx_file)  
+  
+  
+  sheet_names <- local_xlsx_file |>
+    
+    openxlsx::getSheetNames()
+  
+  data_sheets <-
+    sheet_names[sapply(sheet_names, function(sheet) grepl("Area|Extent", sheet,
+                                                          
+    ignore.case = TRUE))]
+  
+  purrr::map(
+    data_sheets,
+    ~ ice_extent_sheet(local_xlsx_file, .)) |>
+    bind_rows()  
+}
+
+```
+```{r error=TRUE}
+. = ottr::check("tests/Seaice1.R")
+```
+
+The function can be tested directly as follows and it should load the Northern hemisphere file.
+
+```{r error=TRUE}
+# Nothing to change here
+ice_extent_file()
+```
+
+Using the function `ice_extent_file` in `pmap`, together with `list_rbind()`, we load both files into a dataframe.
+
+```{r error=TRUE, tags=c()}
+(loaded_ice_extent <-
+   pmap(
+     
+     list(
+       
+       remote_xlsx_file = sea_ice,
+       
+       local_xlsx_file = sea_ice_files
+       ),
+     ice_extent_file) |>
+   
+   list_rbind()
+)
+```
+```{r error=TRUE}
+. = ottr::check("tests/Seaice2.R")
+```
+
+
+The values in the column `measure` indicate the number in `ice_extent` is the actual `Area` or the `Extent` of the ice in the `region`. We want to see how the `Area` and `Extent` relate, so we will need to reorganize the datafram by pivoting.
+
+```{r error=TRUE, tags=c()}
+(seaice <- loaded_ice_extent |>
+   
+   pivot_wider(
+     
+     id_cols = c("month", "day", "year", "region", "hemisphere"),
+     
+     names_from = measure,
+     
+     values_from = ice_extent
+     )
+)
+```
+
+
+```{r error=TRUE}
+. = ottr::check("tests/Seaice3.R")
+```
+
+We can use log scale plot to get a sense of what model we should expect.
+
+```{r error=TRUE, tags=c()}
+seaicelabs <- labs(x="Logrithmic scale for Area measurements", 
+                   
+       y="Logrithmic scale for Extent measurements",
+       
+       title="Relation between the measurements of Area and Extent for sea ice",
+       
+       subtitle="Linear in log scale", 
+       
+       caption="Data from NSIDC")
+
+(seaice_plot <- seaice |>
+    
+    ggplot(mapping = aes(x=Area, y=Extent)) + 
+    
+    geom_point() +
+    
+    geom_smooth() +
+    
+    scale_x_log10() +
+    
+    scale_y_log10() +
+    seaicelabs
+)
+```
+
+```{r error=TRUE}
+. = ottr::check("tests/Seaice4.R")
+```
+
+The plot very much asks for a linear regression model for the logarithm of `Area` and `Extent`. We create a dataframe including the (base 2) logarithm of the values in `Area` and `Extent`. Note that there will be `NA` values and we need to make sure that we do not take logarithm of `0` or `NA`. So we need to filter the rows that contains `NA` values out from the result.
+
+```{r error=TRUE, tags=c()}
+str(seaice)
+
+(log_seaice <- seaice |>
+    
+    mutate(
+      date = make_date(year, month, day),
+      
+      log_area = log2(Area),
+      
+      log_extent = log2(Extent)
+      ) |>
+    filter(!((is.na(Area) | is.na(Extent)) | (Area == 0 | Extent == 0))) 
+)
+```
+
+```{r error=TRUE}
+. = ottr::check("tests/Seaice5.R")
+```
+
+We now split the data into two portions, for *training* and *testing*.
+
+```{r error=TRUE, tags=c()}
+set.seed(505)
+(seaice_split <- log_seaice |>
+    
+    initial_split(prop=0.80)
+)
+(seaice_training <- seaice_split |>
+    
+    training()
+)
+(seaice_testing <- seaice_split |>
+    
+    testing()
+)
+```
+```{r error=TRUE}
+. = ottr::check("tests/Seaice6.R")
+```
+
+Now set up the workflow for all linear regression model.
+
+```{r error=TRUE, tags=c()}
+(lm_wflow <- workflow() |>
+   
+   add_model(
+     
+     linear_reg() |>
+       
+       set_engine("lm")
+     )
+)
+```
+
+```{r error=TRUE}
+. = ottr::check("tests/Seaice7.R")
+```
+
+Then create the workflow for the relations between `log_extent` and `log_area`, following the steps.
+
+```{r error=TRUE, tags=c()}
+(seaice_ratio_wflow <- lm_wflow  |>
+   
+   add_formula(log_extent~log_area)
+)
+
+(seaice_training_fit <- seaice_ratio_wflow  |>
+    
+    fit(seaice_training)
+)
+
+(seaice_training_summary <- seaice_training_fit  |>
+    
+    extract_fit_engine() |>
+    
+    summary()
+  )
+```
+
+```{r error=TRUE}
+. = ottr::check("tests/Seaice8.R")
+```
+
+So the model basically says that the `Extent` and `Area` should more or less follow the relation $$Extent = 2^{3.5536} Area^{0.8405} = 11.742 Area^{0.8405}$$ Now we pretend that we have gone through the tuning and selecting of models and can test the model by fit it to the testing data and collect the metrics to see how well it does.
+
+```{r error=TRUE, tags=c()}
+
+(seaice_final <- seaice_training_fit |>
+   
+   last_fit(seaice_split)
+)
+
+(fitted_seaice <- seaice_final |>
+    
+    extract_workflow()
+)
+
+(seaice_testing_metrics <- seaice_final |>
+    
+    collect_metrics()
+)
+```
+
+```{r error=TRUE}
+. = ottr::check("tests/Seaice9.R")
+```
+
+The metrics from the testing data show that the model is quite good, as more than $98\%$ of the variation from the `log_extent` is captured by the model. We can try to plot the residuals.
+
+```{r error=TRUE, tags=c()}
+(seaice_resid_plot <- seaice_final |>
+   
+   collect_predictions() |>
+   
+   select(.pred) |>
+   
+   cbind(seaice_testing) |>
+   
+   mutate(residual = log_extent - .pred) |>
+   
+   ggplot(mapping = aes(x = log_extent, y = residual)) + 
+   
+   geom_hex(bins = 85) +
+   
+   theme_minimal()
+)
+```
+
+```{r error=TRUE}
+. = ottr::check("tests/Seaice10.R")
+```
+
+The residuals seem to still have some patterns. In particular, it looks like the model tends to over-estimate the ice extent when the area is small.
+
+This is the end of Project 4, while there are many questions to ask with these data and things to learn using modeling.
+
+```{r active="", eval=FALSE}
+# END ASSIGNMENT 
+```
