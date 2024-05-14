@@ -1,6 +1,6 @@
 ---
 title: "Project 4"
-author: "PUT DOWN YOUR NAME"
+author: "Bhaveeka Matlani"
 date: "12/1/2023"
 output:
   word_document: default
@@ -33,24 +33,18 @@ library(dplyr)
 tidymodels_prefer() # to specify that tidymodels functions override those from other packages
 ```
 
-**NOTE**: If you have used AI(s) in producing some of your work, please list the respective AI(s) as a collaborator below. Please also describe the contribution from the input of the AI(s) in the textbox, as well as provide details on how you have used the AI(s) in the process.
-
-```         
-   If you have used AI(s), input information in this box.
 ```
 
 # Project 4
 
 ## Overview
 
-In this project, we will continue using the NOAA storm data set, which you have already worked with in Projects 2 and 3, and the sea ice data set, which you have seen in Project 3, as well as in lectures. We will preprocess the data and attempt to build linear regression models for aspects in the data.
+In this project,  I am using the NOAA storm data set and the sea ice data set, I will preprocess the data and attempt to build linear regression models for aspects in the data.
 
 ## Model for Pacific and Atlantic hurricanes
 
-We first load the hurricane data from NOAA, which you have worked with in both Projects 2 and 3.
-
 ```{r error=TRUE}
-# Nothing to change here
+
 cyclone_data_address <- "https://www.nhc.noaa.gov/data/hurdat/"
 AT_cyclone <- "hurdat2-1851-2022-050423.txt"
 NP_cyclone <- "hurdat2-nepac-1949-2022-050423.txt"
@@ -175,7 +169,8 @@ cyclones_raw <- cyclone_files |>
 . = ottr::check("tests/Cyclones1.R")
 ```
 
-We'd like to see if the number of cyclones in Atlantic and Pacific in a year is somehow related, and if a simple linear regression model can give us some information. To start, we need to process the data so that we have the counts we would like to use. We count the number of cyclones in each year that reach a given maximal category.
+To see if the number of cyclones in Atlantic and Pacific in a year is somehow related, and if a simple linear regression model can give us some information. 
+To start, we need to process the data so that we have the counts we would like to use. We count the number of cyclones in each year that reach a given maximal category.
 
 ```{r error=TRUE, tags=c()}
 cat_levels <- c("TD", "TS", "1", "2", "3", "4", "5")
@@ -219,10 +214,7 @@ Then we split the resulted counting data into two, one of which contains the inf
 We then reorganize the dataframes so that they can be joined and we can look at possible relation between the numbers in the two oceans.
 
 ```{r error=TRUE}
-# Nothing to change here
 
-## Try to understand the code in this block and make sure to know what the output looks like
-## It will be useful for working with the later code blocks.
 count_by_cat <- function(cyclones_cat_count, basin = "AL") {
   cyclones_cat_count|>
     pivot_wider(
@@ -495,8 +487,8 @@ The values in the column `measure` indicate the number in `ice_extent` is the ac
 . = ottr::check("tests/Seaice3.R")
 ```
 
-We can use log scale plot to get a sense of what model we should expect.
 
+We can use log scale plot to get a sense of what model we should expect.
 ```{r error=TRUE, tags=c()}
 seaicelabs <- labs(x="Logrithmic scale for Area measurements", 
        y="Logrithmic scale for Extent measurements",
@@ -1133,5 +1125,4 @@ The residuals seem to still have some patterns. In particular, it looks like the
 This is the end of Project 4, while there are many questions to ask with these data and things to learn using modeling.
 
 ```{r active="", eval=FALSE}
-# END ASSIGNMENT 
 ```
